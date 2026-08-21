@@ -1,0 +1,3 @@
+# Immutable Plans, Pre-flight Revalidation, and Native Trash Lifecycle
+
+Reclaiming developer storage risks data loss or unexpected rebuilds if candidates drift or unreviewed deletions occur. We decided that cleanup actions require generating an immutable serialized plan, performing pre-flight candidate revalidation immediately before execution, moving files to native macOS Trash instead of permanent deletion, and recording an append-only run journal for auditing and restoration. This guarantees an explicit review boundary, prevents time-of-check to time-of-use races, and ensures reversible operations by default.

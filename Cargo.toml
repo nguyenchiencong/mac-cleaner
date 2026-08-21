@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/mac-cleaner-core",
+    "crates/mac-cleaner-cli",
+]
+resolver = "2"

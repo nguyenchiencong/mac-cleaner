@@ -1,0 +1,29 @@
+[package]
+name = "mac-cleaner-cli"
+version = "0.1.0"
+edition = "2021"
+authors = ["macOS Cleaner Team"]
+description = "Command-line interface for macOS Cleaner"
+
+[[bin]]
+name = "mac-cleaner"
+path = "src/main.rs"
+
+[dependencies]
+mac-cleaner-core = { path = "../mac-cleaner-core" }
+clap = { version = "4.4", features = ["derive", "env"] }
+comfy-table = "7.1"
+colored = "2.1"
+dialoguer = "0.11"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.6", features = ["serde", "v4"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+is-terminal = "0.4"
+anyhow = "1.0"
+
+[dev-dependencies]
+tempfile = "3.9"
