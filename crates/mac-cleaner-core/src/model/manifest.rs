@@ -1,6 +1,6 @@
-use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::model::candidate::{AllocatedSize, RevalidationFingerprint};
@@ -48,14 +48,12 @@ pub enum JournalEntryKind {
         exit_code: Option<i32>,
         duration_ms: u64,
     },
+    /// Candidate permanently removed in place (irreversible, not restorable from Trash).
+    PurgeSuccess,
     /// Candidate skipped because pre-flight revalidation detected filesystem drift or vanishing.
-    SkippedDrift {
-        reason: String,
-    },
+    SkippedDrift { reason: String },
     /// Operation failed with an error.
-    Failed {
-        error: String,
-    },
+    Failed { error: String },
 }
 
 /// An append-only structured record persisted during execution that tracks operation
@@ -101,7 +99,10 @@ impl RunJournalEntry {
             path,
             timestamp: Utc::now(),
             kind: JournalEntryKind::TrashSuccess,
-            details: Some(format!("Relocated to trash at {}", receipt.trash_path.display())),
+            details: Some(format!(
+                "Relocated to trash at {}",
+                receipt.trash_path.display()
+            )),
             receipt: Some(receipt),
         }
     }
@@ -129,6 +130,21 @@ impl RunJournalEntry {
         }
     }
 
+    pub fn purge_success(plan_id: Uuid, action_id: Uuid, path: PathBuf) -> Self {
+        Self {
+            entry_id: Uuid::new_v4(),
+            plan_id,
+            action_id,
+            path,
+            timestamp: Utc::now(),
+            kind: JournalEntryKind::PurgeSuccess,
+            details: Some(
+                "Permanently removed in place; this action cannot be restored from Trash".into(),
+            ),
+            receipt: None,
+        }
+    }
+
     pub fn skipped_drift(
         plan_id: Uuid,
         action_id: Uuid,
@@ -150,12 +166,7 @@ impl RunJournalEntry {
         }
     }
 
-    pub fn failed(
-        plan_id: Uuid,
-        action_id: Uuid,
-        path: PathBuf,
-        error: impl Into<String>,
-    ) -> Self {
+    pub fn failed(plan_id: Uuid, action_id: Uuid, path: PathBuf, error: impl Into<String>) -> Self {
         let err_str = error.into();
         Self {
             entry_id: Uuid::new_v4(),

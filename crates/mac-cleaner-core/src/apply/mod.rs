@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -7,6 +9,7 @@ use crate::model::candidate::{AllocatedSize, ExecutionStrategy, RevalidationFing
 use crate::model::manifest::RunJournalEntry;
 use crate::model::plan::Plan;
 use crate::platform::process::{ProcessError, ProcessExecutor};
+use crate::platform::space::FreeSpaceSnapshot;
 use crate::platform::trash::{TrashBackend, TrashError};
 
 #[derive(Error, Debug)]
@@ -24,15 +27,52 @@ pub enum ApplyError {
     Process(#[from] ProcessError),
 }
 
+/// Outcome classification for an individual approved action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplyItemStatus {
+    MovedToTrash,
+    ExternalCommandSucceeded,
+    PermanentlyPurged,
+    SkippedDrift,
+    Failed,
+}
+
+impl ApplyItemStatus {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::MovedToTrash => "Moved to Trash",
+            Self::ExternalCommandSucceeded => "Command succeeded",
+            Self::PermanentlyPurged => "Permanently purged",
+            Self::SkippedDrift => "Skipped (drift)",
+            Self::Failed => "Failed",
+        }
+    }
+}
+
+/// Outcome details for one approved action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyItemResult {
+    pub path: PathBuf,
+    pub status: ApplyItemStatus,
+    pub allocated_estimate: AllocatedSize,
+    pub details: String,
+}
+
 /// Summary report of an apply execution run.
 #[derive(Debug, Clone, Default)]
 pub struct ApplySummary {
     pub total_processed: usize,
     pub successful_trash_moves: usize,
     pub successful_external_commands: usize,
+    pub successful_in_place_purges: usize,
     pub skipped_drifts: usize,
     pub failures: usize,
+    /// Allocated estimate for successful actions, not a measured capacity delta.
     pub reclaimed_size: AllocatedSize,
+    /// Observed net available-space delta across action filesystems, if measurable.
+    pub observed_free_space_delta_bytes: Option<i64>,
+    pub item_results: Vec<ApplyItemResult>,
 }
 
 /// Execution engine executing approved actions from plans with strict pre-flight revalidation.
@@ -64,6 +104,10 @@ impl ApplyEngine {
 
         let mut summary = ApplySummary::default();
         let plan_id = plan.metadata.plan_id;
+        let space_before = FreeSpaceSnapshot::capture(
+            plan.approved_actions()
+                .map(|action| (action.path.as_path(), action.fingerprint.dev)),
+        );
 
         for action in plan.approved_actions() {
             summary.total_processed += 1;
@@ -90,21 +134,30 @@ impl ApplyEngine {
                             &reason,
                         ))?;
                         summary.skipped_drifts += 1;
+                        summary.item_results.push(ApplyItemResult {
+                            path: action.path.clone(),
+                            status: ApplyItemStatus::SkippedDrift,
+                            allocated_estimate: action.expected_size,
+                            details: reason,
+                        });
                         continue;
                     }
                 }
                 Err(e) => {
-                    let reason = format!(
-                        "Path vanished or inaccessible before execution: {}",
-                        e
-                    );
+                    let reason = format!("Path vanished or inaccessible before execution: {}", e);
                     journal.append(&RunJournalEntry::skipped_drift(
                         plan_id,
                         action.action_id,
                         action.path.clone(),
-                        reason,
+                        reason.clone(),
                     ))?;
                     summary.skipped_drifts += 1;
+                    summary.item_results.push(ApplyItemResult {
+                        path: action.path.clone(),
+                        status: ApplyItemStatus::SkippedDrift,
+                        allocated_estimate: action.expected_size,
+                        details: reason,
+                    });
                     continue;
                 }
             }
@@ -115,22 +168,38 @@ impl ApplyEngine {
                     match self.trash_backend.move_to_trash(&action.path) {
                         Ok(receipt) => {
                             summary.successful_trash_moves += 1;
-                            summary.reclaimed_size += receipt.size;
+                            let receipt_size = receipt.size;
+                            summary.reclaimed_size += receipt_size;
+                            let details =
+                                format!("Trash destination: {}", receipt.trash_path.display());
                             journal.append(&RunJournalEntry::trash_success(
                                 plan_id,
                                 action.action_id,
                                 action.path.clone(),
                                 receipt,
                             ))?;
+                            summary.item_results.push(ApplyItemResult {
+                                path: action.path.clone(),
+                                status: ApplyItemStatus::MovedToTrash,
+                                allocated_estimate: receipt_size,
+                                details,
+                            });
                         }
                         Err(e) => {
                             summary.failures += 1;
+                            let details = format!("Trash move failed: {}", e);
                             journal.append(&RunJournalEntry::failed(
                                 plan_id,
                                 action.action_id,
                                 action.path.clone(),
-                                format!("Trash move failed: {}", e),
+                                details.clone(),
                             ))?;
+                            summary.item_results.push(ApplyItemResult {
+                                path: action.path.clone(),
+                                status: ApplyItemStatus::Failed,
+                                allocated_estimate: action.expected_size,
+                                details,
+                            });
                         }
                     }
                 }
@@ -138,12 +207,19 @@ impl ApplyEngine {
                     if let Some(cmd) = &action.command {
                         if cmd.is_empty() {
                             summary.failures += 1;
+                            let details = "External command was empty".to_string();
                             journal.append(&RunJournalEntry::failed(
                                 plan_id,
                                 action.action_id,
                                 action.path.clone(),
-                                "External command was empty",
+                                details.clone(),
                             ))?;
+                            summary.item_results.push(ApplyItemResult {
+                                path: action.path.clone(),
+                                status: ApplyItemStatus::Failed,
+                                allocated_estimate: action.expected_size,
+                                details,
+                            });
                             continue;
                         }
 
@@ -159,6 +235,11 @@ impl ApplyEngine {
                                 if output.success {
                                     summary.successful_external_commands += 1;
                                     summary.reclaimed_size += action.expected_size;
+                                    let details = format!(
+                                        "Exit code {:?}; completed in {} ms",
+                                        output.exit_code,
+                                        output.duration.as_millis()
+                                    );
                                     journal.append(&RunJournalEntry::external_success(
                                         plan_id,
                                         action.action_id,
@@ -167,29 +248,64 @@ impl ApplyEngine {
                                         output.duration.as_millis() as u64,
                                         Some(output.stdout),
                                     ))?;
+                                    summary.item_results.push(ApplyItemResult {
+                                        path: action.path.clone(),
+                                        status: ApplyItemStatus::ExternalCommandSucceeded,
+                                        allocated_estimate: action.expected_size,
+                                        details,
+                                    });
                                 } else {
                                     summary.failures += 1;
+                                    let details = format!(
+                                        "Command exited with code {:?}: {}",
+                                        output.exit_code, output.stderr
+                                    );
                                     journal.append(&RunJournalEntry::failed(
                                         plan_id,
                                         action.action_id,
                                         action.path.clone(),
-                                        format!(
-                                            "Command exited with code {:?}: {}",
-                                            output.exit_code, output.stderr
-                                        ),
+                                        details.clone(),
                                     ))?;
+                                    summary.item_results.push(ApplyItemResult {
+                                        path: action.path.clone(),
+                                        status: ApplyItemStatus::Failed,
+                                        allocated_estimate: action.expected_size,
+                                        details,
+                                    });
                                 }
                             }
                             Err(e) => {
                                 summary.failures += 1;
+                                let details = format!("Process execution error: {}", e);
                                 journal.append(&RunJournalEntry::failed(
                                     plan_id,
                                     action.action_id,
                                     action.path.clone(),
-                                    format!("Process execution error: {}", e),
+                                    details.clone(),
                                 ))?;
+                                summary.item_results.push(ApplyItemResult {
+                                    path: action.path.clone(),
+                                    status: ApplyItemStatus::Failed,
+                                    allocated_estimate: action.expected_size,
+                                    details,
+                                });
                             }
                         }
+                    } else {
+                        summary.failures += 1;
+                        let details = "External command was missing".to_string();
+                        journal.append(&RunJournalEntry::failed(
+                            plan_id,
+                            action.action_id,
+                            action.path.clone(),
+                            details.clone(),
+                        ))?;
+                        summary.item_results.push(ApplyItemResult {
+                            path: action.path.clone(),
+                            status: ApplyItemStatus::Failed,
+                            allocated_estimate: action.expected_size,
+                            details,
+                        });
                     }
                 }
                 ExecutionStrategy::InPlacePurge => {
@@ -201,34 +317,44 @@ impl ApplyEngine {
 
                     match res {
                         Ok(_) => {
-                            summary.successful_trash_moves += 1;
+                            summary.successful_in_place_purges += 1;
                             summary.reclaimed_size += action.expected_size;
-                            journal.append(&RunJournalEntry::trash_success(
+                            journal.append(&RunJournalEntry::purge_success(
                                 plan_id,
                                 action.action_id,
                                 action.path.clone(),
-                                crate::model::manifest::TrashReceipt::new(
-                                    action.path.clone(),
-                                    action.path.clone(),
-                                    action.fingerprint,
-                                    action.expected_size,
-                                ),
                             ))?;
+                            summary.item_results.push(ApplyItemResult {
+                                path: action.path.clone(),
+                                status: ApplyItemStatus::PermanentlyPurged,
+                                allocated_estimate: action.expected_size,
+                                details:
+                                    "Permanently removed; this action cannot be restored from Trash"
+                                        .into(),
+                            });
                         }
                         Err(e) => {
                             summary.failures += 1;
+                            let details = format!("In-place purge failed: {}", e);
                             journal.append(&RunJournalEntry::failed(
                                 plan_id,
                                 action.action_id,
                                 action.path.clone(),
-                                format!("In-place purge failed: {}", e),
+                                details.clone(),
                             ))?;
+                            summary.item_results.push(ApplyItemResult {
+                                path: action.path.clone(),
+                                status: ApplyItemStatus::Failed,
+                                allocated_estimate: action.expected_size,
+                                details,
+                            });
                         }
                     }
                 }
             }
         }
 
+        summary.observed_free_space_delta_bytes = space_before.net_delta_bytes();
         Ok(summary)
     }
 }
@@ -236,10 +362,10 @@ impl ApplyEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
     use crate::model::candidate::{Candidate, RiskTier};
     use crate::model::diagnostic::CoverageStatus;
     use crate::platform::trash::FakeTrashBackend;
+    use tempfile::tempdir;
 
     #[test]
     fn test_apply_and_revalidation_lifecycle() {
@@ -297,11 +423,55 @@ mod tests {
         assert_eq!(summary.successful_trash_moves, 1);
         assert_eq!(summary.skipped_drifts, 1);
         assert_eq!(summary.failures, 0);
+        assert_eq!(summary.item_results.len(), 2);
+        assert_eq!(summary.item_results[0].status, ApplyItemStatus::MovedToTrash);
+        assert_eq!(summary.item_results[1].status, ApplyItemStatus::SkippedDrift);
 
         // file1 should be trashed
         assert!(!file1.exists());
         // file2 should NOT be touched because it drifted
         assert!(file2.exists());
-        assert_eq!(std::fs::read(&file2).unwrap(), b"modified content by another process");
+        assert_eq!(
+            std::fs::read(&file2).unwrap(),
+            b"modified content by another process"
+        );
+    }
+
+    #[test]
+    fn in_place_purge_is_recorded_as_irreversible_not_a_trash_receipt() {
+        let work_dir = tempdir().unwrap();
+        let trash_dir = tempdir().unwrap();
+        let journal_dir = tempdir().unwrap();
+        let target = work_dir.path().join("purge_me.tmp");
+        std::fs::write(&target, b"irreversible test data").unwrap();
+
+        let candidate = Candidate::new(
+            target.clone(),
+            "test_purge",
+            RiskTier::Tier3Retained,
+            ExecutionStrategy::InPlacePurge,
+            AllocatedSize::new(22, 512),
+            RevalidationFingerprint::from_path(&target).unwrap(),
+            "Explicit in-place purge",
+        );
+        let action = crate::model::plan::PlannedAction::from_candidate(&candidate, true);
+        let plan = Plan::new(vec![action], CoverageStatus::Complete, vec![]);
+        let engine = ApplyEngine::new(
+            Arc::new(FakeTrashBackend::new(trash_dir.path())),
+            Arc::new(ProcessExecutor::new()),
+        );
+        let mut journal = JournalWriter::create_default_in(&journal_dir).unwrap();
+
+        let summary = engine.apply(&plan, &mut journal).unwrap();
+
+        assert!(!target.exists());
+        assert_eq!(summary.successful_trash_moves, 0);
+        assert_eq!(summary.successful_in_place_purges, 1);
+        assert_eq!(summary.item_results[0].status, ApplyItemStatus::PermanentlyPurged);
+        assert!(crate::journal::JournalReader::read_trash_receipts(journal.path())
+            .unwrap()
+            .is_empty());
+        let entries = crate::journal::JournalReader::read_entries(journal.path()).unwrap();
+        assert_eq!(entries.last().unwrap().kind, crate::model::manifest::JournalEntryKind::PurgeSuccess);
     }
 }

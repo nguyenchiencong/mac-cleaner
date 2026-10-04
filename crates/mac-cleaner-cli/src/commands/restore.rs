@@ -76,10 +76,17 @@ pub fn execute_restore(args: RestoreArgs) -> Result<()> {
     let receipts = JournalReader::read_trash_receipts(&journal_path)?;
 
     if receipts.is_empty() {
-        println!(
-            "{}",
-            "No restorable trash receipts found in this run journal.".yellow()
-        );
+        if args.json {
+            print_json(&RestoreJsonOutput::new(
+                &args.run_id,
+                &mac_cleaner_core::restore::RestoreSummary::default(),
+            ))?;
+        } else {
+            println!(
+                "{}",
+                "No restorable trash receipts found in this run journal.".yellow()
+            );
+        }
         return Ok(());
     }
 
@@ -103,11 +110,13 @@ pub fn execute_restore(args: RestoreArgs) -> Result<()> {
     let trash_backend = Arc::new(NativeTrashBackend::new());
     let restore_engine = RestoreEngine::new(trash_backend);
 
-    println!(
-        "Restoring {} item(s) from run journal at {}...",
-        target_receipts.len(),
-        journal_path.display().to_string().cyan()
-    );
+    if !args.json {
+        println!(
+            "Restoring {} item(s) from run journal at {}...",
+            target_receipts.len(),
+            journal_path.display().to_string().cyan()
+        );
+    }
 
     let summary = restore_engine.restore_receipts(&target_receipts);
 

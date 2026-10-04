@@ -1,13 +1,13 @@
+use colored::Colorize;
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Attribute, Cell, Color, ContentArrangement, Table};
-use colored::Colorize;
 use std::path::Path;
 
-use mac_cleaner_core::apply::ApplySummary;
+use mac_cleaner_core::apply::{ApplyItemStatus, ApplySummary};
 use mac_cleaner_core::model::candidate::{AllocatedSize, Candidate, RiskTier};
 use mac_cleaner_core::model::diagnostic::{CoverageStatus, ScanDiagnostic};
 use mac_cleaner_core::model::plan::Plan;
-use mac_cleaner_core::restore::RestoreSummary;
+use mac_cleaner_core::restore::{RestoreItemStatus, RestoreSummary};
 
 pub fn risk_tier_color(tier: RiskTier) -> Color {
     match tier {
@@ -66,8 +66,8 @@ pub fn print_candidates_table(
         total_allocated = total_allocated.saturating_add(candidate.size.allocated_bytes);
         total_logical = total_logical.saturating_add(candidate.size.logical_bytes);
 
-        let tier_cell = Cell::new(candidate.risk_tier.display_name())
-            .fg(risk_tier_color(candidate.risk_tier));
+        let tier_cell =
+            Cell::new(candidate.risk_tier.display_name()).fg(risk_tier_color(candidate.risk_tier));
 
         table.add_row(vec![
             Cell::new((idx + 1).to_string()),
@@ -118,7 +118,10 @@ pub fn print_plan_table(plan: &Plan) {
         "  Created At:      {}",
         plan.metadata.created_at.to_rfc2822().dimmed()
     );
-    println!("  Engine Version:  {}", plan.metadata.engine_version.dimmed());
+    println!(
+        "  Engine Version:  {}",
+        plan.metadata.engine_version.dimmed()
+    );
 
     let mut table = Table::new();
     table
@@ -140,8 +143,8 @@ pub fn print_plan_table(plan: &Plan) {
             Cell::new("[ ] NO").fg(Color::DarkGrey)
         };
 
-        let tier_cell = Cell::new(action.risk_tier.display_name())
-            .fg(risk_tier_color(action.risk_tier));
+        let tier_cell =
+            Cell::new(action.risk_tier.display_name()).fg(risk_tier_color(action.risk_tier));
 
         let strategy_str = match action.execution_strategy {
             mac_cleaner_core::model::candidate::ExecutionStrategy::NativeTrash => "Native Trash",
@@ -210,6 +213,10 @@ pub fn print_apply_summary(summary: &ApplySummary, journal_path: &Path) {
         Cell::new(summary.successful_external_commands.to_string()).fg(Color::Green),
     ]);
     table.add_row(vec![
+        Cell::new("Successful In-Place Purges (irreversible)"),
+        Cell::new(summary.successful_in_place_purges.to_string()).fg(Color::Yellow),
+    ]);
+    table.add_row(vec![
         Cell::new("Skipped Due to Drift"),
         Cell::new(summary.skipped_drifts.to_string()).fg(if summary.skipped_drifts > 0 {
             Color::Yellow
@@ -226,19 +233,74 @@ pub fn print_apply_summary(summary: &ApplySummary, journal_path: &Path) {
         }),
     ]);
     table.add_row(vec![
-        Cell::new("Reclaimed Physical Storage (Est)"),
+        Cell::new("Allocated Estimate Processed (not actual freed space)"),
         Cell::new(summary.reclaimed_size.human_readable_allocated()).fg(Color::Green),
     ]);
     table.add_row(vec![
-        Cell::new("Reclaimed Logical File Size"),
-        Cell::new(summary.reclaimed_size.human_readable_logical()).fg(Color::Cyan),
+        Cell::new("Observed Net Available-Space Change"),
+        Cell::new(format_optional_space_delta(
+            summary.observed_free_space_delta_bytes,
+        )),
     ]);
 
     println!("{table}");
+
+    if !summary.item_results.is_empty() {
+        println!("\n{}", "Per-item outcomes:".bold());
+        let mut items = Table::new();
+        items.load_preset(UTF8_FULL);
+        items.set_content_arrangement(ContentArrangement::Dynamic);
+        items.set_header(vec![
+            Cell::new("Result").add_attribute(Attribute::Bold),
+            Cell::new("Allocated Estimate").add_attribute(Attribute::Bold),
+            Cell::new("Path").add_attribute(Attribute::Bold),
+            Cell::new("Details").add_attribute(Attribute::Bold),
+        ]);
+
+        for result in &summary.item_results {
+            let color = match result.status {
+                ApplyItemStatus::MovedToTrash | ApplyItemStatus::ExternalCommandSucceeded => {
+                    Color::Green
+                }
+                ApplyItemStatus::PermanentlyPurged => Color::Yellow,
+                ApplyItemStatus::SkippedDrift => Color::Yellow,
+                ApplyItemStatus::Failed => Color::Red,
+            };
+            items.add_row(vec![
+                Cell::new(result.status.display_name()).fg(color),
+                Cell::new(result.allocated_estimate.human_readable_allocated()),
+                Cell::new(result.path.display().to_string()),
+                Cell::new(&result.details),
+            ]);
+        }
+        println!("{items}");
+    }
+
+    if summary.successful_trash_moves > 0 {
+        println!(
+            "\nItems moved to native Trash remain recoverable with `mac-cleaner restore` and do not free disk space until you empty Trash. Empty Trash in Finder to release that space."
+        );
+    }
+    println!(
+        "Observed available-space change is volume-wide and may include unrelated activity; APFS snapshots and shared extents can also affect reclamation."
+    );
     println!(
         "\nAudit Journal persisted at: {}",
         journal_path.display().to_string().cyan()
     );
+}
+
+fn format_optional_space_delta(delta_bytes: Option<i64>) -> String {
+    match delta_bytes {
+        Some(delta) => {
+            let sign = if delta >= 0 { "+" } else { "-" };
+            format!(
+                "{sign}{}",
+                AllocatedSize::format_human_bytes(delta.unsigned_abs())
+            )
+        }
+        None => "Unavailable".to_string(),
+    }
 }
 
 /// Formats and prints a Restore summary.
@@ -286,6 +348,34 @@ pub fn print_restore_summary(summary: &RestoreSummary) {
     ]);
 
     println!("{table}");
+
+    if !summary.item_results.is_empty() {
+        println!("\n{}", "Per-item restoration outcomes:".bold());
+        let mut items = Table::new();
+        items.load_preset(UTF8_FULL);
+        items.set_content_arrangement(ContentArrangement::Dynamic);
+        items.set_header(vec![
+            Cell::new("Result").add_attribute(Attribute::Bold),
+            Cell::new("Original Path").add_attribute(Attribute::Bold),
+            Cell::new("Trash Path").add_attribute(Attribute::Bold),
+            Cell::new("Details").add_attribute(Attribute::Bold),
+        ]);
+
+        for result in &summary.item_results {
+            let color = match result.status {
+                RestoreItemStatus::Restored => Color::Green,
+                RestoreItemStatus::DestinationCollision => Color::Yellow,
+                RestoreItemStatus::NotFoundInTrash | RestoreItemStatus::Failed => Color::Red,
+            };
+            items.add_row(vec![
+                Cell::new(result.status.display_name()).fg(color),
+                Cell::new(result.original_path.display().to_string()),
+                Cell::new(result.trash_path.display().to_string()),
+                Cell::new(&result.details),
+            ]);
+        }
+        println!("{items}");
+    }
 }
 
 /// Represents summarized run history row.
@@ -296,6 +386,7 @@ pub struct HistoryRow {
     pub actions_count: usize,
     pub trashed_count: usize,
     pub external_count: usize,
+    pub purged_count: usize,
     pub reclaimed_allocated: String,
     pub status: String,
 }
@@ -319,7 +410,8 @@ pub fn print_history_table(rows: &[HistoryRow]) {
             Cell::new("Actions").add_attribute(Attribute::Bold),
             Cell::new("Trashed").add_attribute(Attribute::Bold),
             Cell::new("External").add_attribute(Attribute::Bold),
-            Cell::new("Reclaimed").add_attribute(Attribute::Bold),
+            Cell::new("Purged").add_attribute(Attribute::Bold),
+            Cell::new("Allocated Estimate").add_attribute(Attribute::Bold),
             Cell::new("Recoverability").add_attribute(Attribute::Bold),
         ]);
 
@@ -338,6 +430,7 @@ pub fn print_history_table(rows: &[HistoryRow]) {
             Cell::new(row.actions_count.to_string()),
             Cell::new(row.trashed_count.to_string()),
             Cell::new(row.external_count.to_string()),
+            Cell::new(row.purged_count.to_string()),
             Cell::new(&row.reclaimed_allocated).fg(Color::Green),
             status_cell,
         ]);
@@ -354,7 +447,9 @@ pub fn print_diagnostics_summary(diagnostics: &[ScanDiagnostic]) {
 
     println!(
         "\n{}",
-        format!("Diagnostics & Non-Fatal Notices ({}):", diagnostics.len()).yellow().bold()
+        format!("Diagnostics & Non-Fatal Notices ({}):", diagnostics.len())
+            .yellow()
+            .bold()
     );
 
     for (i, diag) in diagnostics.iter().enumerate().take(15) {

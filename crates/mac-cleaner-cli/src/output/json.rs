@@ -1,11 +1,11 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use mac_cleaner_core::apply::ApplySummary;
+use crate::output::table::HistoryRow;
+use mac_cleaner_core::apply::{ApplyItemResult, ApplySummary};
 use mac_cleaner_core::model::candidate::Candidate;
 use mac_cleaner_core::model::diagnostic::{CoverageStatus, ScanDiagnostic};
 use mac_cleaner_core::restore::RestoreSummary;
-use crate::output::table::HistoryRow;
 
 pub const CURRENT_CLI_JSON_SCHEMA_VERSION: u32 = 1;
 
@@ -56,10 +56,13 @@ pub struct ApplyJsonOutput {
     pub total_processed: usize,
     pub successful_trash_moves: usize,
     pub successful_external_commands: usize,
+    pub successful_in_place_purges: usize,
     pub skipped_drifts: usize,
     pub failures: usize,
     pub reclaimed_allocated_bytes: u64,
     pub reclaimed_logical_bytes: u64,
+    pub observed_free_space_delta_bytes: Option<i64>,
+    pub item_results: Vec<ApplyItemResult>,
 }
 
 impl ApplyJsonOutput {
@@ -71,10 +74,13 @@ impl ApplyJsonOutput {
             total_processed: summary.total_processed,
             successful_trash_moves: summary.successful_trash_moves,
             successful_external_commands: summary.successful_external_commands,
+            successful_in_place_purges: summary.successful_in_place_purges,
             skipped_drifts: summary.skipped_drifts,
             failures: summary.failures,
             reclaimed_allocated_bytes: summary.reclaimed_size.allocated_bytes,
             reclaimed_logical_bytes: summary.reclaimed_size.logical_bytes,
+            observed_free_space_delta_bytes: summary.observed_free_space_delta_bytes,
+            item_results: summary.item_results.clone(),
         }
     }
 }
@@ -89,6 +95,7 @@ pub struct RestoreJsonOutput {
     pub skipped_collisions: usize,
     pub not_found_in_trash: usize,
     pub failed: usize,
+    pub item_results: Vec<mac_cleaner_core::restore::RestoreItemResult>,
 }
 
 impl RestoreJsonOutput {
@@ -102,6 +109,7 @@ impl RestoreJsonOutput {
             skipped_collisions: summary.skipped_collisions,
             not_found_in_trash: summary.not_found_in_trash,
             failed: summary.failed,
+            item_results: summary.item_results.clone(),
         }
     }
 }
@@ -120,6 +128,7 @@ pub struct HistoryJsonRow {
     pub actions_count: usize,
     pub trashed_count: usize,
     pub external_count: usize,
+    pub purged_count: usize,
     pub reclaimed_allocated: String,
     pub status: String,
 }
@@ -132,6 +141,7 @@ impl From<&HistoryRow> for HistoryJsonRow {
             actions_count: r.actions_count,
             trashed_count: r.trashed_count,
             external_count: r.external_count,
+            purged_count: r.purged_count,
             reclaimed_allocated: r.reclaimed_allocated.clone(),
             status: r.status.clone(),
         }

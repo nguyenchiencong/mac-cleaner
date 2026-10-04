@@ -58,7 +58,9 @@ pub fn execute_apply(args: ApplyArgs) -> Result<()> {
     if approved_count == 0 {
         println!(
             "{}",
-            "Plan contains 0 approved actions. Nothing to execute.".yellow().bold()
+            "Plan contains 0 approved actions. Nothing to execute."
+                .yellow()
+                .bold()
         );
         return Ok(());
     }
@@ -131,14 +133,15 @@ pub fn execute_apply(args: ApplyArgs) -> Result<()> {
         print_json(&out)?;
     } else {
         print_apply_summary(&summary, &journal_path);
-        println!(
-            "\nManifest ID: {}",
-            run_id.bold().cyan()
-        );
-        println!(
-            "To restore items from this execution run, execute:\n  {}",
-            format!("mac-cleaner restore {}", run_id).green().bold()
-        );
+        println!("\nManifest ID: {}", run_id.bold().cyan());
+        if summary.successful_trash_moves > 0 {
+            println!(
+                "To restore items still in Trash, execute:\n  {}",
+                format!("mac-cleaner restore {}", run_id).green().bold()
+            );
+        } else {
+            println!("No items from this run were moved to Trash; irreversible actions cannot be restored.");
+        }
     }
 
     Ok(())

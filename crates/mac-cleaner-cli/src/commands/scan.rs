@@ -3,10 +3,11 @@ use clap::Args;
 use std::path::PathBuf;
 
 use mac_cleaner_core::config::{ConfigProfile, WorkspaceRoot};
-use mac_cleaner_core::model::diagnostic::CoverageStatus;
+use mac_cleaner_core::model::diagnostic::{CoverageStatus, ScanDiagnostic};
 use mac_cleaner_core::scanners::{ScanContext, ScannerRegistry};
 
 use crate::commands::matches_category;
+use crate::commands::progress::ScanProgress;
 use crate::output::json::{print_json, ScanJsonOutput};
 use crate::output::table::print_candidates_table;
 
@@ -40,11 +41,13 @@ pub fn execute_scan(args: ScanArgs) -> Result<()> {
     let ctx = ScanContext::from_config(&config);
     let registry = ScannerRegistry::default_registry();
 
+    let scan_progress = ScanProgress::start("Scanning configured workspaces and caches...");
     let scan_results = if let Some(cat) = &args.category {
         registry.execute_filtered(&ctx, |scanner| matches_category(scanner.name(), cat))
     } else {
         registry.execute_all(&ctx)
     };
+    drop(scan_progress);
 
     let mut all_candidates = Vec::new();
     let mut all_diagnostics = Vec::new();
@@ -59,6 +62,12 @@ pub fn execute_scan(args: ScanArgs) -> Result<()> {
             }
             Err(e) => {
                 tracing::warn!("Scanner execution warning: {}", e);
+                all_diagnostics.push(ScanDiagnostic::incomplete_coverage(
+                    None,
+                    "scanner",
+                    e.to_string(),
+                ));
+                merged_coverage = CoverageStatus::Incomplete;
             }
         }
     }

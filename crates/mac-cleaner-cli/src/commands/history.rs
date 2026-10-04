@@ -47,8 +47,8 @@ pub fn execute_history(args: HistoryArgs) -> Result<()> {
                 let mut action_ids = HashSet::new();
                 let mut trash_count = 0usize;
                 let mut external_count = 0usize;
+                let mut purged_count = 0usize;
                 let mut reclaimed_bytes = 0u64;
-                let mut had_external = false;
 
                 for entry in &entries {
                     action_ids.insert(entry.action_id);
@@ -57,24 +57,21 @@ pub fn execute_history(args: HistoryArgs) -> Result<()> {
                         JournalEntryKind::TrashSuccess => {
                             trash_count += 1;
                             if let Some(r) = &entry.receipt {
-                                reclaimed_bytes = reclaimed_bytes.saturating_add(r.size.allocated_bytes);
+                                reclaimed_bytes =
+                                    reclaimed_bytes.saturating_add(r.size.allocated_bytes);
                             }
                         }
                         JournalEntryKind::ExternalSuccess { .. } => {
                             external_count += 1;
-                            had_external = true;
+                        }
+                        JournalEntryKind::PurgeSuccess => {
+                            purged_count += 1;
                         }
                         _ => {}
                     }
                 }
 
-                let status = if had_external {
-                    "Irreversible (External)".to_string()
-                } else if trash_count > 0 {
-                    "Recoverable (Trash)".to_string()
-                } else {
-                    "No Changes".to_string()
-                };
+                let status = history_status(trash_count, external_count, purged_count).to_string();
 
                 history_rows.push(HistoryRow {
                     run_id: filename_stem,
@@ -82,6 +79,7 @@ pub fn execute_history(args: HistoryArgs) -> Result<()> {
                     actions_count: action_ids.len(),
                     trashed_count: trash_count,
                     external_count,
+                    purged_count,
                     reclaimed_allocated: AllocatedSize::format_human_bytes(reclaimed_bytes),
                     status,
                 });
@@ -105,4 +103,28 @@ pub fn execute_history(args: HistoryArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn history_status(trash_count: usize, external_count: usize, purged_count: usize) -> &'static str {
+    let has_trash = trash_count > 0;
+    let has_irreversible_actions = external_count > 0 || purged_count > 0;
+
+    match (has_trash, has_irreversible_actions) {
+        (true, true) => "Mixed (Trash + Irreversible)",
+        (false, true) => "Irreversible (External or In-Place Purge)",
+        (true, false) => "Recoverable (Trash)",
+        (false, false) => "No Changes",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_status_preserves_purge_irreversibility() {
+        assert_eq!(history_status(0, 0, 1), "Irreversible (External or In-Place Purge)");
+        assert_eq!(history_status(1, 0, 1), "Mixed (Trash + Irreversible)");
+        assert_eq!(history_status(1, 0, 0), "Recoverable (Trash)");
+    }
 }

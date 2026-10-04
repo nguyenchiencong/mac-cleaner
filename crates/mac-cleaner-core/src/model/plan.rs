@@ -1,10 +1,12 @@
-use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::path::PathBuf;
 use uuid::Uuid;
 
-use crate::model::candidate::{AllocatedSize, Candidate, ExecutionStrategy, RevalidationFingerprint, RiskTier};
+use crate::model::candidate::{
+    AllocatedSize, Candidate, ExecutionStrategy, RevalidationFingerprint, RiskTier,
+};
 use crate::model::diagnostic::{CoverageStatus, ScanDiagnostic};
 
 pub const CURRENT_PLAN_SCHEMA_VERSION: u32 = 1;
@@ -134,8 +136,10 @@ impl Plan {
         let mut total_logical_bytes = 0u64;
 
         for action in &actions {
-            total_allocated_bytes = total_allocated_bytes.saturating_add(action.expected_size.allocated_bytes);
-            total_logical_bytes = total_logical_bytes.saturating_add(action.expected_size.logical_bytes);
+            total_allocated_bytes =
+                total_allocated_bytes.saturating_add(action.expected_size.allocated_bytes);
+            total_logical_bytes =
+                total_logical_bytes.saturating_add(action.expected_size.logical_bytes);
         }
 
         let metadata = PlanMetadata {
@@ -174,7 +178,7 @@ impl Plan {
                     .map(|v| v == "true")
                     .unwrap_or_else(|| candidate.risk_tier.is_safe_for_auto_clean());
 
-                let approved = if coverage_status.is_degraded() {
+                let approved = if !coverage_status.is_complete() {
                     false
                 } else if auto_approve_safe {
                     is_safe
@@ -211,8 +215,10 @@ impl Plan {
         let mut total_allocated_bytes = 0u64;
         let mut total_logical_bytes = 0u64;
         for action in &self.actions {
-            total_allocated_bytes = total_allocated_bytes.saturating_add(action.expected_size.allocated_bytes);
-            total_logical_bytes = total_logical_bytes.saturating_add(action.expected_size.logical_bytes);
+            total_allocated_bytes =
+                total_allocated_bytes.saturating_add(action.expected_size.allocated_bytes);
+            total_logical_bytes =
+                total_logical_bytes.saturating_add(action.expected_size.logical_bytes);
         }
         self.metadata.total_allocated_bytes = total_allocated_bytes;
         self.metadata.total_logical_bytes = total_logical_bytes;
@@ -293,15 +299,32 @@ mod tests {
         );
 
         // Coverage is degraded: auto_approve_safe = true MUST NOT approve
-        let plan = Plan::from_candidates(
-            vec![candidate],
-            CoverageStatus::Degraded,
-            vec![],
-            true,
-        );
+        let plan = Plan::from_candidates(vec![candidate], CoverageStatus::Degraded, vec![], true);
 
         assert_eq!(plan.actions.len(), 1);
-        assert!(!plan.actions[0].approved, "Degraded coverage must prevent auto-approval");
+        assert!(
+            !plan.actions[0].approved,
+            "Degraded coverage must prevent auto-approval"
+        );
+    }
+
+    #[test]
+    fn test_incomplete_coverage_disables_auto_approval() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let fp = RevalidationFingerprint::from_path(temp_file.path()).unwrap();
+        let candidate = Candidate::new(
+            temp_file.path().to_path_buf(),
+            "rust_target",
+            RiskTier::Tier1ReDownloadable,
+            ExecutionStrategy::NativeTrash,
+            AllocatedSize::new(100, 512),
+            fp,
+            "Cache item",
+        );
+
+        let plan = Plan::from_candidates(vec![candidate], CoverageStatus::Incomplete, vec![], true);
+
+        assert!(!plan.actions[0].approved);
     }
 
     #[test]
@@ -318,12 +341,7 @@ mod tests {
             "Node modules",
         );
 
-        let plan = Plan::from_candidates(
-            vec![candidate],
-            CoverageStatus::Complete,
-            vec![],
-            true,
-        );
+        let plan = Plan::from_candidates(vec![candidate], CoverageStatus::Complete, vec![], true);
 
         let json = plan.to_json().unwrap();
         let deserialized = Plan::from_json(&json).unwrap();

@@ -4,10 +4,12 @@ use colored::Colorize;
 use std::path::PathBuf;
 
 use mac_cleaner_core::config::{ConfigProfile, WorkspaceRoot};
+use mac_cleaner_core::model::diagnostic::{CoverageStatus, ScanDiagnostic};
 use mac_cleaner_core::model::plan::Plan;
 use mac_cleaner_core::plan::PlanBuilder;
-use mac_cleaner_core::scanners::{ScanContext, ScannerRegistry};
+use mac_cleaner_core::scanners::{ScanContext, ScanResult, ScannerRegistry};
 
+use crate::commands::progress::ScanProgress;
 use crate::commands::{matches_category, parse_duration_to_days};
 use crate::output::table::print_plan_table;
 
@@ -46,18 +48,23 @@ pub fn execute_plan(args: PlanArgs) -> Result<()> {
         if let Some(days) = parse_duration_to_days(older_than_str) {
             config.age_threshold_days = Some(days);
         } else {
-            bail!("Invalid --older-than format: '{}'. Expected e.g. 30d, 14d, 2w", older_than_str);
+            bail!(
+                "Invalid --older-than format: '{}'. Expected e.g. 30d, 14d, 2w",
+                older_than_str
+            );
         }
     }
 
     let ctx = ScanContext::from_config(&config);
     let registry = ScannerRegistry::default_registry();
 
+    let scan_progress = ScanProgress::start("Scanning configured workspaces and caches...");
     let scan_results = if let Some(cat) = &args.category {
         registry.execute_filtered(&ctx, |scanner| matches_category(scanner.name(), cat))
     } else {
         registry.execute_all(&ctx)
     };
+    drop(scan_progress);
 
     let mut builder = PlanBuilder::new().with_auto_approve_safe(true);
 
@@ -68,6 +75,16 @@ pub fn execute_plan(args: PlanArgs) -> Result<()> {
             }
             Err(e) => {
                 tracing::warn!("Scanner error during plan generation: {}", e);
+                let mut failed_scan = ScanResult::new("scanner");
+                failed_scan.coverage_status = CoverageStatus::Incomplete;
+                failed_scan
+                    .diagnostics
+                    .push(ScanDiagnostic::incomplete_coverage(
+                        None,
+                        "scanner",
+                        e.to_string(),
+                    ));
+                builder = builder.add_scan_result(failed_scan);
             }
         }
     }
@@ -82,7 +99,9 @@ pub fn execute_plan(args: PlanArgs) -> Result<()> {
         std::fs::write(out_path, json_str)?;
         println!(
             "{}",
-            format!("Plan successfully written to: {}", out_path.display()).green().bold()
+            format!("Plan successfully written to: {}", out_path.display())
+                .green()
+                .bold()
         );
         println!(
             "To execute this plan, run: {}",

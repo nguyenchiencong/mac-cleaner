@@ -543,6 +543,7 @@ dependencies = [
  "clap",
  "colored",
  "comfy-table",
+ "console",
  "dialoguer",
  "is-terminal",
  "mac-cleaner-core",
@@ -561,6 +562,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "hex",
+ "libc",
  "objc",
  "rayon",
  "serde",

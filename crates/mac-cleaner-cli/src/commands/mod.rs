@@ -3,6 +3,7 @@ pub mod clean;
 pub mod config;
 pub mod history;
 pub mod plan;
+pub mod progress;
 pub mod restore;
 pub mod scan;
 

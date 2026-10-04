@@ -83,7 +83,12 @@ impl TrashBackend for NativeTrashBackend {
         {
             trash::delete(&path).map_err(|e| TrashError::BackendError(e.to_string()))?;
             let fallback_trash_path = path.clone();
-            Ok(TrashReceipt::new(path, fallback_trash_path, fingerprint, size))
+            Ok(TrashReceipt::new(
+                path,
+                fallback_trash_path,
+                fingerprint,
+                size,
+            ))
         }
     }
 
@@ -92,7 +97,9 @@ impl TrashBackend for NativeTrashBackend {
             return Err(RestoreError::TrashItemNotFound(receipt.trash_path.clone()));
         }
 
-        if receipt.original_path.exists() || std::fs::symlink_metadata(&receipt.original_path).is_ok() {
+        if receipt.original_path.exists()
+            || std::fs::symlink_metadata(&receipt.original_path).is_ok()
+        {
             return Err(RestoreError::DestinationCollision {
                 path: receipt.original_path.clone(),
             });
@@ -105,8 +112,9 @@ impl TrashBackend for NativeTrashBackend {
         // Attempt direct atomic rename
         if let Err(_rename_err) = std::fs::rename(&receipt.trash_path, &receipt.original_path) {
             // Fallback for cross-device moves
-            copy_and_remove(&receipt.trash_path, &receipt.original_path)
-                .map_err(|e| RestoreError::BackendError(format!("Failed to restore cross-device: {}", e)))?;
+            copy_and_remove(&receipt.trash_path, &receipt.original_path).map_err(|e| {
+                RestoreError::BackendError(format!("Failed to restore cross-device: {}", e))
+            })?;
         }
 
         Ok(())
@@ -116,9 +124,9 @@ impl TrashBackend for NativeTrashBackend {
 #[cfg(target_os = "macos")]
 #[allow(unexpected_cfgs)]
 fn macos_trash_item(path: &Path) -> Result<PathBuf, String> {
-    use std::ffi::CString;
     use objc::runtime::{Class, Object};
     use objc::{msg_send, sel, sel_impl};
+    use std::ffi::CString;
 
     let path_str = path
         .to_str()
@@ -291,19 +299,19 @@ impl TrashBackend for FakeTrashBackend {
 
         copy_and_remove(path, &target_trash_path)?;
 
-        let receipt = TrashReceipt::new(
-            path.to_path_buf(),
-            target_trash_path,
-            fingerprint,
-            size,
-        );
+        let receipt = TrashReceipt::new(path.to_path_buf(), target_trash_path, fingerprint, size);
 
         self.trashed_receipts.lock().unwrap().push(receipt.clone());
         Ok(receipt)
     }
 
     fn restore(&self, receipt: &TrashReceipt) -> Result<(), RestoreError> {
-        if let Some(err) = self.injected_restore_errors.lock().unwrap().get(&receipt.trash_path) {
+        if let Some(err) = self
+            .injected_restore_errors
+            .lock()
+            .unwrap()
+            .get(&receipt.trash_path)
+        {
             return Err(RestoreError::BackendError(err.clone()));
         }
 
@@ -311,7 +319,9 @@ impl TrashBackend for FakeTrashBackend {
             return Err(RestoreError::TrashItemNotFound(receipt.trash_path.clone()));
         }
 
-        if receipt.original_path.exists() || std::fs::symlink_metadata(&receipt.original_path).is_ok() {
+        if receipt.original_path.exists()
+            || std::fs::symlink_metadata(&receipt.original_path).is_ok()
+        {
             return Err(RestoreError::DestinationCollision {
                 path: receipt.original_path.clone(),
             });
@@ -351,7 +361,10 @@ mod tests {
         backend.restore(&receipt).unwrap();
         assert!(file_path.exists());
         assert!(!receipt.trash_path.exists());
-        assert_eq!(std::fs::read(&file_path).unwrap(), b"test payload for trash");
+        assert_eq!(
+            std::fs::read(&file_path).unwrap(),
+            b"test payload for trash"
+        );
     }
 
     #[test]
@@ -393,7 +406,10 @@ mod tests {
 
         // Restore must fail with DestinationCollision to avoid data loss
         let result = backend.restore(&receipt);
-        assert!(matches!(result, Err(RestoreError::DestinationCollision { .. })));
+        assert!(matches!(
+            result,
+            Err(RestoreError::DestinationCollision { .. })
+        ));
     }
 
     #[test]
@@ -408,7 +424,9 @@ mod tests {
         backend.inject_trash_error(&file_path, "Injected disk write failure");
 
         let err = backend.move_to_trash(&file_path).unwrap_err();
-        assert!(matches!(err, TrashError::BackendError(msg) if msg.contains("Injected disk write failure")));
+        assert!(
+            matches!(err, TrashError::BackendError(msg) if msg.contains("Injected disk write failure"))
+        );
         assert!(file_path.exists());
     }
 }

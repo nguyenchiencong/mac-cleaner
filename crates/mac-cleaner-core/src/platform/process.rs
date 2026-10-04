@@ -15,10 +15,7 @@ pub enum ProcessError {
     Timeout(Duration),
 
     #[error("Failed to execute command '{command}': {details}")]
-    ExecutionFailed {
-        command: String,
-        details: String,
-    },
+    ExecutionFailed { command: String, details: String },
 
     #[error("I/O error during process execution: {0}")]
     Io(#[from] std::io::Error),
@@ -127,7 +124,10 @@ impl ProcessExecutor {
         }
     }
 
-    fn collect_output(mut child: Child, start_time: Instant) -> Result<ProcessOutput, ProcessError> {
+    fn collect_output(
+        mut child: Child,
+        start_time: Instant,
+    ) -> Result<ProcessOutput, ProcessError> {
         let mut stdout_buf = Vec::new();
         let mut stderr_buf = Vec::new();
 
@@ -158,7 +158,9 @@ mod tests {
     #[test]
     fn test_process_executor_success() {
         let executor = ProcessExecutor::new();
-        let output = executor.execute("echo", &["hello", "cleaner"], None).unwrap();
+        let output = executor
+            .execute("echo", &["hello", "cleaner"], None)
+            .unwrap();
         assert!(output.success);
         assert_eq!(output.exit_code, Some(0));
         assert!(output.stdout.contains("hello cleaner"));
@@ -167,7 +169,9 @@ mod tests {
     #[test]
     fn test_process_executor_command_not_found() {
         let executor = ProcessExecutor::new();
-        let err = executor.execute("non_existent_binary_xyz_123", &[], None).unwrap_err();
+        let err = executor
+            .execute("non_existent_binary_xyz_123", &[], None)
+            .unwrap_err();
         assert!(matches!(err, ProcessError::CommandNotFound(_)));
     }
 
@@ -175,7 +179,9 @@ mod tests {
     fn test_process_executor_timeout() {
         let executor = ProcessExecutor::new();
         // sleep 5 seconds with a 100ms timeout
-        let err = executor.execute("sleep", &["5"], Some(Duration::from_millis(100))).unwrap_err();
+        let err = executor
+            .execute("sleep", &["5"], Some(Duration::from_millis(100)))
+            .unwrap_err();
         assert!(matches!(err, ProcessError::Timeout(_)));
     }
 }
