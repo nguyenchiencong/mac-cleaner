@@ -21,6 +21,20 @@ use crate::commands::progress::ScanProgress;
 use crate::commands::{matches_category, parse_duration_to_days, runs_dir};
 use crate::output::table::{print_apply_summary, print_diagnostics_summary};
 
+/// Columns dialoguer's `SimpleTheme` writes before each multi-select item: a 5-column marker
+/// (`"> [ ]"` or `"  [x]"`) plus one separating space (`format_multi_select_prompt_item`).
+const MULTI_SELECT_PREFIX_WIDTH: usize = 6;
+
+/// Lines printed above the list: scan banner, spacer, summary, key hints.
+const LIST_HEADER_LINES: usize = 4;
+/// Headroom for the two rows dialoguer's `Paging` reserves for its prompt; this list sets no
+/// prompt, so these rows are currently left undrawn.
+const LIST_PAGING_OVERHEAD: usize = 2;
+/// Cursor line below the list plus one spare row so the final newline cannot scroll the screen
+/// and invalidate dialoguer's redraw height.
+const LIST_BOTTOM_MARGIN: usize = 2;
+const LIST_RESERVED_ROWS: usize = LIST_HEADER_LINES + LIST_PAGING_OVERHEAD + LIST_BOTTOM_MARGIN;
+
 #[derive(Args, Debug)]
 pub struct CleanArgs {
     /// Skip interactive prompts and auto-approve safe items
@@ -137,7 +151,8 @@ pub fn execute_clean(args: CleanArgs) -> Result<()> {
         let term = Term::stderr();
         let (rows, columns) = term.size();
         let terminal_width = if columns == 0 { 80 } else { columns as usize };
-        let max_length = usize::from(rows.saturating_sub(8)).max(1);
+        let item_width = multi_select_item_width(terminal_width);
+        let max_length = usize::from(rows).saturating_sub(LIST_RESERVED_ROWS).max(1);
 
         println!(
             "\n{}",
@@ -156,7 +171,7 @@ pub fn execute_clean(args: CleanArgs) -> Result<()> {
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let items: Vec<String> = candidates
             .iter()
-            .map(|candidate| format_candidate_line(candidate, terminal_width, home.as_deref()))
+            .map(|candidate| format_candidate_line(candidate, item_width, home.as_deref()))
             .collect();
 
         match MultiSelect::new()
@@ -289,6 +304,10 @@ fn auto_clean_indices(candidates: &[Candidate], coverage: CoverageStatus) -> Vec
         .collect()
 }
 
+fn multi_select_item_width(terminal_width: usize) -> usize {
+    terminal_width.saturating_sub(MULTI_SELECT_PREFIX_WIDTH)
+}
+
 fn format_candidate_line(candidate: &Candidate, width: usize, home: Option<&Path>) -> String {
     let tier = match candidate.risk_tier {
         mac_cleaner_core::model::candidate::RiskTier::Tier1ReDownloadable => "Tier 1",
@@ -331,8 +350,10 @@ fn sanitize_terminal_text(value: &str) -> String {
 }
 
 fn format_candidate_parts(tier: &str, size: &str, target: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
     let prefix = format!("{tier:<6} {size:>10}  ");
-    let width = width.max(1);
     let prefix_width = measure_text_width(&prefix);
     if prefix_width >= width {
         return truncate_str(&prefix, width, "").into_owned();
@@ -439,7 +460,10 @@ mod tests {
             ),
         ];
 
-        assert_eq!(auto_clean_indices(&candidates, CoverageStatus::Complete), vec![0]);
+        assert_eq!(
+            auto_clean_indices(&candidates, CoverageStatus::Complete),
+            vec![0]
+        );
         assert!(auto_clean_indices(&candidates, CoverageStatus::Incomplete).is_empty());
     }
 
@@ -469,5 +493,84 @@ mod tests {
     fn middle_truncation_handles_zero_and_one_column() {
         assert_eq!(middle_truncate("long path", 0), "");
         assert_eq!(middle_truncate("long path", 1), "…");
+    }
+
+    #[test]
+    fn multi_select_marker_matches_reserved_prefix_width() {
+        for marker in ["> [ ]", "  [x]"] {
+            assert_eq!(
+                measure_text_width(&format!("{marker} ")),
+                MULTI_SELECT_PREFIX_WIDTH
+            );
+        }
+        assert_eq!(multi_select_item_width(80), 74);
+        assert_eq!(multi_select_item_width(MULTI_SELECT_PREFIX_WIDTH), 0);
+        assert_eq!(multi_select_item_width(1), 0);
+    }
+
+    #[test]
+    fn multi_select_rows_fit_terminal_width_including_marker_prefix() {
+        let long_target = "/Users/someone/Dev/malinux/apps/api/target/debug/build/generated-crate-with-a-long-name-0123456789/out";
+
+        let truncated = format_candidate_parts(
+            "Tier 2",
+            "1.54 GB",
+            long_target,
+            multi_select_item_width(80),
+        );
+        assert!(truncated.contains('…'));
+        assert!(truncated.ends_with("/out"));
+
+        for width in [80, 40, 20] {
+            for target in ["/Users/someone/Dev/malinux/apps/api/target", long_target] {
+                let item = format_candidate_parts(
+                    "Tier 2",
+                    "1.54 GB",
+                    target,
+                    multi_select_item_width(width),
+                );
+                for marker in ["> [ ]", "  [x]"] {
+                    let row = format!("{marker} {item}");
+                    assert!(
+                        measure_text_width(&row) <= width,
+                        "row {row:?} exceeds terminal width {width}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn multi_select_rows_fit_terminal_width_for_wide_unicode_paths() {
+        let target = "~/開発/非常に長いプロジェクト名/apps/api/target";
+        for width in [40, 30, 20] {
+            let item =
+                format_candidate_parts("Tier 1", "1.00 KB", target, multi_select_item_width(width));
+            let row = format!("> [ ] {item}");
+            assert!(
+                measure_text_width(&row) <= width,
+                "row {row:?} exceeds terminal width {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn multi_select_rows_never_exceed_any_terminal_width() {
+        let target = "/Users/someone/開発/malinux/apps/api/target/debug/build/generated-0123456789";
+        for width in 0..=120 {
+            let item_width = multi_select_item_width(width);
+            let item = format_candidate_parts("Tier 2", "1.54 GB", target, item_width);
+            assert!(
+                measure_text_width(&item) <= item_width,
+                "item overflows its budget at terminal width {width}"
+            );
+            if width >= MULTI_SELECT_PREFIX_WIDTH {
+                let row = format!("> [ ] {item}");
+                assert!(
+                    measure_text_width(&row) <= width,
+                    "row {row:?} exceeds terminal width {width}"
+                );
+            }
+        }
     }
 }
